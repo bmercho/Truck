@@ -42,7 +42,7 @@ CAB_WALL = 1.2                # hollow cab wall thickness (3 perimeters at 0.4 m
 CAB_SPLIT = 11.0              # everything on the cab below this (door-bottom line) is black
 CAB_FLOOR = 11.6              # inside floor height: gives the white cab its own 0.6 floor
 
-BOX_X = (1.0, 73.0)           # front wall leaves a 3.5 mm gap to the cab for the ladder
+BOX_X = (1.0, 73.0)           # front wall leaves a 3.5 mm gap to the cab for the reefer unit
 BOX_Z = (11.0, 35.2)
 
 DETAIL = 0.4                  # depth of engraved panel lines / recesses
@@ -302,20 +302,6 @@ cargo = cargo.fuse(reefer).removeSplitter()
 reefer_envelope = box(BOX_X[1] - REEFER_SEAT - 0.02, GAP_FRONT + 1, -REEFER_HW - 0.15 / SCALE, REEFER_HW + 0.15 / SCALE,
                       REEFER_BOTTOM - 0.15 / SCALE, REEFER_TOP + 0.15 / SCALE)
 
-# Ladder in the gap behind the cab at the left-hand (+Y) front corner, turned to face out
-# of the side as in the photo: rails front and back, rungs running fore and aft.
-LADDER_FACE = HW - 0.3                               # outer face, just inside the box side
-LADDER_DEPTH = 0.9                                   # rail depth across the truck
-LADDER_Z = (BOX_Z[0] + 1.0, REEFER_BOTTOM - 0.3)     # up to the underside of the reefer
-RAIL, RUNG = 0.8, 0.6
-rails_x = [(BOX_X[1] - 0.1, BOX_X[1] + RAIL), (GAP_FRONT - 0.2 - RAIL, GAP_FRONT - 0.2)]   # back one on the wall
-ladder = [box(x0, x1, LADDER_FACE - LADDER_DEPTH, LADDER_FACE, LADDER_Z[0], LADDER_Z[1]) for x0, x1 in rails_x]
-z = LADDER_Z[0] + 1.2
-while z + RUNG < LADDER_Z[1] - 0.4:
-    ladder.append(box(rails_x[0][0], rails_x[1][1], LADDER_FACE - 0.75, LADDER_FACE - 0.15, z, z + RUNG))
-    z += 2.2
-cargo = fuse_all([cargo] + ladder)
-
 # ---- Branding: inlays set flush into the surface (for multi-colour printing) ------
 # Logos, wordmark and tagline are the vector outlines from the Aldom brand guidelines
 # (extracted to aldom_artwork.json). The slogan is set in Arial Bold, the guidelines'
@@ -524,6 +510,43 @@ black_text = inlays_black.common(cargo).removeSplitter()
 grey_parts = inlays_grey.common(cargo).removeSplitter()
 cargo = cargo.cut(inlays_red).cut(inlays_black).cut(inlays_grey).removeSplitter()
 
+# QR code on the roof: copied module for module from the brand guidelines' back cover
+# (aldom_qr.json, decodes to https://aldom.com.au/). Black squares inlaid in the white roof,
+# with the white quiet zone round them; read from above. In the kit it is a separate panel.
+QR = json.load(open(os.path.join(OUT_DIR, "aldom_qr.json")))
+QR_MODULE = 0.96 / SCALE      # 0.96 mm squares: easy to print and to scan
+QR_QUIET = 4                  # white border, in modules (the QR standard's minimum)
+QR_PANEL_T = 0.8              # panel thickness; it sits flush in a recess in the roof
+QR_CX = 38.0                  # centred on the roof (between the rear door panel and the front)
+qr_w = (len(QR) + 2 * QR_QUIET) * QR_MODULE
+
+
+def qr_square(w, z0, z1):
+    sq = box(QR_CX - w / 2, QR_CX + w / 2, -w / 2, w / 2, z0, z1)
+    return fillet(sq, (0.6, 0.4), lambda e: e.BoundBox.ZLength > z1 - z0 - 0.01, "qr corners")
+
+
+qr_panel = qr_square(qr_w, BOX_Z[1] - QR_PANEL_T, BOX_Z[1])
+# Seen from above with the truck's front at the top, the grid's columns run towards -Y
+# and its rows towards -X (so the code is not mirrored).
+qr_rects = []
+half = len(QR) * QR_MODULE / 2
+for r, row in enumerate(QR):
+    c = 0
+    while c < len(row):
+        if row[c]:
+            c1 = c
+            while c1 < len(row) and row[c1]:
+                c1 += 1
+            qr_rects.append(box(QR_CX + half - (r + 1) * QR_MODULE, QR_CX + half - r * QR_MODULE,
+                                half - c1 * QR_MODULE, half - c * QR_MODULE,
+                                BOX_Z[1] - INLAY_DEPTH, BOX_Z[1] + 0.05))
+            c = c1
+        else:
+            c += 1
+qr_black = fuse_all(qr_rects).common(cargo).removeSplitter()
+cargo = cargo.cut(qr_black).removeSplitter()
+
 # ---- Chassis & running gear (black) -----------------------------------------
 frame = cbox(1.0, 99.0, FRAME_W, FRAME_Z[0], FRAME_Z[1])
 subframe = cbox(2.0, BOX_X[1] - 1, FRAME_W, FRAME_Z[1] - 0.1, BOX_Z[0] + 0.1)
@@ -624,7 +647,7 @@ def scaled(shape):
 
 
 all_red = red_parts.fuse(cab_red).removeSplitter()
-all_black_text = black_text.fuse(reefer_black).removeSplitter()
+all_black_text = black_text.fuse(reefer_black).fuse(qr_black).removeSplitter()
 white_shape = cab.fuse(cargo).removeSplitter()
 # Multi-colour STLs must not overlap, or the slicer has to guess which colour wins:
 # trim the black running gear where the frame runs up inside the white cab and box.
@@ -673,6 +696,7 @@ print(f"printability (strokes under {MIN_FEATURE * SCALE:.2f} mm): " +
 #   reefer   white + black        fridge unit, prints front face up (black grille in the top layers)
 #   wheels   black + silver       print 4 front + 4 rear, outer face up (silver rim in the top layers);
 #                                 they push onto axle stubs on the chassis
+#   qr       white + black        QR code panel for the roof, prints face up (black in the top layers)
 # Each piece is exported already in its print orientation (and at SCALE); the colour
 # files of one piece share coordinates, so load them together as one multi-part object.
 KIT_DIR = os.path.join(OUT_DIR, "kit")
@@ -717,6 +741,8 @@ kit_cab = cab.cut(fuse_all([cyl(DOWEL_R, DOWEL_D + 0.1, V(x, y, CAB_SPLIT - 0.1)
 kit_cab = kit_cab.removeSplitter()
 
 kit_box = cargo.cut(rear_zone).cut(reefer_envelope)           # leaves the reefer's locating recess
+kit_box = kit_box.cut(qr_square(qr_w + 2 * CLEAR, BOX_Z[1] - QR_PANEL_T - 0.02, BOX_Z[1] + 1))  # QR panel recess
+kit_qr = qr_panel.cut(qr_black).removeSplitter()
 kit_box = kit_box.fuse([cyl(PIN_R, PIN_L, V(DOOR_SPLIT, y, z), V(-1, 0, 0)) for y, z in DOOR_PINS])
 kit_box = kit_box.fuse([cyl(PEG_R, PEG_H + 0.05, V(x, 0, BOX_Z[0] - PEG_H), up) for x in BOX_PEGS])  # floor pegs
 kit_box = kit_box.removeSplitter()
@@ -736,7 +762,8 @@ kit_pieces = {"chassis": kit_chassis, "cab": kit_cab, "cab_red": cab_red,
               "door": kit_door, "door_red": kit_door_red, "door_black": kit_door_black,
               "reefer": reefer, "reefer_black": reefer_black,
               "wheel_front": kit_wheels["front"][0], "wheel_front_silver": kit_wheels["front"][1],
-              "wheel_rear": kit_wheels["rear"][0], "wheel_rear_silver": kit_wheels["rear"][1]}
+              "wheel_rear": kit_wheels["rear"][0], "wheel_rear_silver": kit_wheels["rear"][1],
+              "qr": kit_qr, "qr_black": qr_black}
 names = list(kit_pieces)
 worst, pair = max((kit_pieces[a].common(kit_pieces[b]).Volume, f"{a}/{b}")
                   for i, a in enumerate(names) for b in names[i + 1:])
@@ -764,6 +791,7 @@ door_p, door_red_p, door_black_p = to_print([kit_door, kit_door_red, kit_door_bl
 reefer_p, reefer_black_p = to_print([reefer, reefer_black], V(0, 1, 0), -90)                         # front face up
 wf_p, wf_silver_p = to_print(list(kit_wheels["front"]), V(1, 0, 0), 90)                              # outer face up
 wr_p, wr_silver_p = to_print(list(kit_wheels["rear"]), V(1, 0, 0), 90)
+qr_p, qr_black_p = to_print([kit_qr, qr_black])                                                      # face up as is
 
 kit_doc = App.newDocument("ReeferTruckKit")
 layout = [("Kit_chassis_black", chassis_p, 0),
@@ -774,7 +802,8 @@ layout = [("Kit_chassis_black", chassis_p, 0),
           ("Kit_door_black", door_black_p, 155),
           ("Kit_reefer_white", reefer_p, 200), ("Kit_reefer_black", reefer_black_p, 200),
           ("Kit_wheel_front_black", wf_p, 230), ("Kit_wheel_front_silver", wf_silver_p, 230),
-          ("Kit_wheel_rear_black", wr_p, 250), ("Kit_wheel_rear_silver", wr_silver_p, 250)]
+          ("Kit_wheel_rear_black", wr_p, 250), ("Kit_wheel_rear_silver", wr_silver_p, 250),
+          ("Kit_qr_white", qr_p, 270), ("Kit_qr_black", qr_black_p, 270)]
 for name, shp, y_off in layout:
     shp_path = os.path.join(KIT_DIR, f"{name[4:]}.stl")
     tmp = kit_doc.addObject("Part::Feature", name + "_export")
