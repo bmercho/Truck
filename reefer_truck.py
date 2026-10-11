@@ -18,7 +18,8 @@ import Mesh
 V = App.Vector
 
 # ---- Parameters ------------------------------------------------------------
-SCALE = 1.5                   # export scale: 100 mm design -> 150 mm model
+TRUCK_LENGTH = float(os.environ.get("TRUCK_LENGTH", "150"))   # mm; e.g. TRUCK_LENGTH=125 freecadcmd reefer_truck.py
+SCALE = TRUCK_LENGTH / 100.0  # export scale from the 100 mm design
 LENGTH = 100.0                # overall design length, including bumper
 NOSE = LENGTH - 0.8           # cab front face (bumper sticks out 0.8)
 WIDTH = 24.0                  # cab and box width
@@ -47,7 +48,18 @@ BOX_Z = (11.0, 35.2)
 
 DETAIL = 0.4                  # depth of engraved panel lines / recesses
 
-OUT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+# the 150 mm build lives in the project folder; other lengths get their own folder (e.g. 125mm\)
+OUT_DIR = SCRIPT_DIR if TRUCK_LENGTH == 150 else os.path.join(SCRIPT_DIR, f"{TRUCK_LENGTH:g}mm")
+os.makedirs(OUT_DIR, exist_ok=True)
+ARTWORK = json.load(open(os.path.join(SCRIPT_DIR, "aldom_artwork.json")))
+# Rear door logo (primary stacked logo with tagline): 25.5 mm wide in real terms, so its
+# tagline prints, but never wider than the space between the door hinge lines.
+_rb = [p for f in ARTWORK["stacked_tagline"] for sp in f["subpaths"] for seg in sp for p in seg[1:]]
+REAR_ASPECT = (max(q[1] for q in _rb) - min(q[1] for q in _rb)) / (max(q[0] for q in _rb) - min(q[0] for q in _rb))
+REAR_W = min(25.5 / SCALE, 18.4)
+REAR_V = 17.0
+REAR_H = REAR_W * REAR_ASPECT
 
 
 # ---- Helpers ---------------------------------------------------------------
@@ -199,8 +211,8 @@ upper_panel = xz_face([(CAB_X0 + 0.9, 16.8), (DOOR_REAR - 0.8, 16.8), (DOOR_REAR
                        (CAB_X0 + 0.9, DOOR_TOP - 0.2)], 0.6)
 hatch = xz_face([(CAB_X0 + 0.9, DOOR_BOTTOM + 0.3), (DOOR_REAR - 0.8, DOOR_BOTTOM + 0.3),
                  (DOOR_REAR - 0.8, 16.2), (CAB_X0 + 0.9, 16.2)], 0.5)
-handle = xz_face([(DOOR_REAR + 0.5, 12.6), (DOOR_REAR + 1.3, 12.6), (DOOR_REAR + 1.3, 13.4),
-                  (DOOR_REAR + 0.5, 13.4)])
+handle = xz_face([(DOOR_REAR + 0.5, 15.0), (DOOR_REAR + 1.3, 15.0), (DOOR_REAR + 1.3, 15.8),   # above the lettering
+                  (DOOR_REAR + 0.5, 15.8)])
 grooves = fuse_all([outline(door_face), outline(upper_panel, 0.3), outline(hatch, 0.3), handle])
 cab = cab.cut(into_sides(grooves, DETAIL))
 cab = cab.cut(into_sides(win_face, CAB_WALL + 1))                   # window: through the wall
@@ -225,14 +237,18 @@ wheel_c = V(92.4, DRIVER_Y, 19.0)
 col_dir = V(-1, 0, 0.55).normalize()
 col_base = V(95.4, DRIVER_Y, WS_BOTTOM + 0.3)        # inside the dashboard
 parts.append(Part.makeCylinder(0.5, (col_base - wheel_c).Length + 0.3, wheel_c, (col_base - wheel_c).normalize()))
-parts.append(Part.makeTorus(2.2, 0.45, wheel_c, col_dir))
-parts.append(Part.makeCylinder(0.8, 0.6, wheel_c - col_dir * 0.3, col_dir))   # hub
-wheel_u = V(0, 1, 0)                        # in the wheel plane, across the cab
-wheel_v = col_dir.cross(wheel_u).normalize()  # in the wheel plane, "up" on the rim
-for ang in (90, 210, 330):                    # three spokes, hub to rim
-    r = math.radians(ang)
-    d = wheel_u * math.cos(r) + wheel_v * math.sin(r)
-    parts.append(Part.makeCylinder(0.3, 2.3, wheel_c, d))
+# A solid wheel (disc, rim and hub) so it survives handling, standing on a vertical column
+# from the floor to its lowest point (as in a cab-over truck). The wheel then prints upwards
+# from the top of the column and needs no support inside the cab.
+SW_R, SW_TUBE = 2.2, 0.55
+parts.append(Part.makeTorus(SW_R, SW_TUBE, wheel_c, col_dir))                     # rim
+parts.append(Part.makeCylinder(SW_R, 0.5, wheel_c - col_dir * 0.25, col_dir))    # disc
+parts.append(Part.makeCylinder(0.9, 0.9, wheel_c - col_dir * 0.2, col_dir))      # hub, on the driver's side
+down = V(0, 0, -1)
+lowest = (down - col_dir * down.dot(col_dir)).normalize()                         # down, within the wheel plane
+wheel_bottom = wheel_c + lowest * SW_R
+parts.append(Part.makeCylinder(1.1, wheel_bottom.z - CAB_FLOOR + 0.3,
+                               V(wheel_bottom.x, wheel_bottom.y, CAB_FLOOR - 0.1)))  # column to the floor
 # Two seats: cushion + reclined backrest
 for sy in (DRIVER_Y, -DRIVER_Y):
     y0, y1 = sy - SEAT_W / 2, sy + SEAT_W / 2
@@ -266,12 +282,12 @@ for y in (-0.2, -HW + 2.2, HW - 2.6):
     cargo = cargo.cut(box(BOX_X[0] - 1, BOX_X[0] + DETAIL, y, y + 0.4, BOX_Z[0] + 1.2, BOX_Z[1] - 1.2))
 # Rear door lock bars, broken where the rear lettering is so it stays legible
 for y in (-3.5, -1.5, 1.1, 3.1):
-    for z0, z1 in ((BOX_Z[0] + 1.5, 16.6), (30.3, BOX_Z[1] - 1.5)):
+    for z0, z1 in ((BOX_Z[0] + 1.5, REAR_V - 0.4), (REAR_V + REAR_H + 0.4, BOX_Z[1] - 1.5)):
         cargo = cargo.fuse(box(BOX_X[0] - 0.35, BOX_X[0] + 0.1, y, y + 0.4, z0, z1))
 
 # Reefer (fridge) unit, as in the photo: an upright housing on the front wall in the gap
 # behind the cab. The roof deflector rises to meet its front face, so from the front only
-# its top shows above the cab, with a three-cell louvred grille; vertical vents on its sides.
+# its top shows above the cab, with a louvred black grille panel; vertical vents on its sides.
 REEFER_HW = 5.5
 REEFER_TOP = BOX_Z[1] - 0.6                          # below the box's rounded top edge
 REEFER_BOTTOM = 28.6
@@ -280,11 +296,14 @@ GAP_FRONT = CAB_X0 - 0.3                             # just clears the back of t
 reefer = box(BOX_X[1] - REEFER_SEAT, GAP_FRONT, -REEFER_HW, REEFER_HW, REEFER_BOTTOM, REEFER_TOP)
 reefer = fillet(reefer, (0.8, 0.5, 0.3), lambda e: e.BoundBox.XMin > BOX_X[1] + 0.1 and
                 (e.BoundBox.ZMin > REEFER_TOP - 0.1 or e.BoundBox.XMin > GAP_FRONT - 0.01), "reefer")
-# black grille on the front face, above the deflector: three cells of horizontal louvres,
+# black grille on the front face, above the deflector: one panel of horizontal louvres,
 # inlaid into the white housing
-GRILLE_CELLS = ((-4.4, -1.6), (-1.3, 1.3), (1.6, 4.4))
+GRILLE_CELLS = ((-4.4, 4.4),)                        # a single black panel
 GRILLE_Z = (ROOF_TOP + 0.25, ROOF_TOP + 1.45)
-grille_in = fuse_all([box(GAP_FRONT - 0.6 / SCALE, GAP_FRONT + 1, y0, y1, GRILLE_Z[0], GRILLE_Z[1])
+# 1.2 mm deep: the panel is so small that at 0.6 mm its file is under the ~9 mm3 at which
+# slicers decide a model must be in inches and scale it up 25.4x
+GRILLE_DEPTH = 1.2 / SCALE
+grille_in = fuse_all([box(GAP_FRONT - GRILLE_DEPTH, GAP_FRONT + 1, y0, y1, GRILLE_Z[0], GRILLE_Z[1])
                       for y0, y1 in GRILLE_CELLS])
 reefer_black = grille_in.common(reefer).removeSplitter()
 reefer = reefer.cut(grille_in).removeSplitter()
@@ -312,7 +331,6 @@ reefer_envelope = box(BOX_X[1] - REEFER_SEAT - 0.02, GAP_FRONT + 1, -REEFER_HW -
 INLAY_DEPTH = 0.6 / SCALE     # 0.6 mm deep in the printed model
 MIN_FEATURE = 0.22 / SCALE    # narrowest line a 0.2 mm nozzle prints reliably (0.22 mm)
 FONT_DIR, FONT_FILE = "C:/Windows/Fonts/", "arialbd.ttf"
-ARTWORK = json.load(open(os.path.join(OUT_DIR, "aldom_artwork.json")))
 _cap_ref = []
 
 
@@ -445,9 +463,16 @@ STRIPE = [(43.0, 11.9), (50.8, 11.9), (59.7, 34.3), (53.5, 34.3), (48.95, 23.1),
 stripe = poly_face(STRIPE)
 
 SLOGAN = ["Built on", "Experience.", "Driven by", "Innovation."]
-SLOGAN_U, SLOGAN_CAP, SLOGAN_TOP = 58.4, 1.45, 28.8    # thinnest stroke (the e's bar) ~0.26 mm printed
+SLOGAN_U, SLOGAN_TOP = 58.4, 28.8
+SLOGAN_RIGHT = 69.5                                  # end of the box side (clear of the rear door panel)
+SLOGAN_CAP = 2.175 / SCALE                           # 2.2 mm capitals: thinnest stroke (the e's bar) ~0.26 mm
 slogan_base = [SLOGAN_TOP - SLOGAN_CAP - i * SLOGAN_CAP * 1.55 for i in range(len(SLOGAN))]
-slogan = [placed(text_face(line, SLOGAN_CAP), SLOGAN_U, v) for line, v in zip(SLOGAN, slogan_base)]
+# narrowed (not shrunk) if it would not fit: that keeps the horizontal strokes, the thinnest ones,
+# at full thickness
+_nat = [text_face(line, SLOGAN_CAP).BoundBox.XLength for line in SLOGAN]
+SLOGAN_SQUEEZE = min(1.0, (SLOGAN_RIGHT - SLOGAN_U) / max(_nat))
+slogan = [placed(text_face(line, SLOGAN_CAP) if SLOGAN_SQUEEZE == 1.0 else text_face(line, SLOGAN_CAP, n * SLOGAN_SQUEEZE),
+                 SLOGAN_U, v) for line, v, n in zip(SLOGAN, slogan_base, _nat)]
 slogan_dash = poly_face([(SLOGAN_U, slogan_base[-1] - 1.6), (SLOGAN_U + 3.0, slogan_base[-1] - 1.6),
                          (SLOGAN_U + 3.0, slogan_base[-1] - 1.1), (SLOGAN_U, slogan_base[-1] - 1.1)])
 
@@ -488,7 +513,6 @@ side_black = side_block["black"] + slogan
 side_grey = pattern
 
 # -- Rear doors: primary stacked logo with tagline, centred (u = 0 at the centre line)
-REAR_W, REAR_V = 17.0, 17.0
 rear = artwork(["stacked_tagline"], REAR_W, -REAR_W / 2, REAR_V)
 
 
@@ -513,8 +537,9 @@ cargo = cargo.cut(inlays_red).cut(inlays_black).cut(inlays_grey).removeSplitter(
 # QR code on the roof: copied module for module from the brand guidelines' back cover
 # (aldom_qr.json, decodes to https://aldom.com.au/). Black squares inlaid in the white roof,
 # with the white quiet zone round them; read from above. In the kit it is a separate panel.
-QR = json.load(open(os.path.join(OUT_DIR, "aldom_qr.json")))
-QR_MODULE = 0.96 / SCALE      # 0.96 mm squares: easy to print and to scan
+QR = json.load(open(os.path.join(SCRIPT_DIR, "aldom_qr.json")))
+# 0.96 mm squares (easy to print and scan), smaller only if the code would not fit the roof
+QR_MODULE = min(0.96 / SCALE, (WIDTH - 2.4) / (len(QR) + 8))
 QR_QUIET = 4                  # white border, in modules (the QR standard's minimum)
 QR_PANEL_T = 0.8              # panel thickness; it sits flush in a recess in the roof
 QR_CX = 38.0                  # centred on the roof (between the rear door panel and the front)
@@ -584,6 +609,8 @@ chassis = chassis.cut(arch.cut(cbox(0, LENGTH, FRAME_W, 0, 40))).removeSplitter(
 
 # Wheels: black tyres with silver rims (the recessed wheel face, hub cap and nuts)
 RIM_R = WHEEL_R - 1.3
+RIM_RECESS = 0.3 / SCALE      # wheel face recessed 0.3 mm into the tyre
+RIM_SILVER = 0.4 / SCALE      # silver layer under it (fewer mixed-colour layers when printing)
 wheels, rims = [], []
 wheel_protos = {}             # tyre width -> (x, black tyre, silver rim) on the +Y side, for the kit
 for x, w in AXLES:
@@ -591,15 +618,15 @@ for x, w in AXLES:
         tyre = cyl_y(x, AXLE_Z, WHEEL_R, WHEEL_Y, WHEEL_Y + w)
         tyre = fillet(tyre, (0.6, 0.4), lambda e: True)
         outer = WHEEL_Y + w
-        tyre = tyre.cut(cyl_y(x, AXLE_Z, WHEEL_R - 1.3, outer - DETAIL, outer + 1))       # rim recess
-        tyre = tyre.fuse(cyl_y(x, AXLE_Z, 1.5, outer - DETAIL - 0.1, outer + 0.2))       # hub cap
+        tyre = tyre.cut(cyl_y(x, AXLE_Z, RIM_R, outer - RIM_RECESS, outer + 1))           # rim recess
+        tyre = tyre.fuse(cyl_y(x, AXLE_Z, 1.5, outer - RIM_RECESS - 0.1, outer + 0.2))   # hub cap
         for k in range(6):                                                               # wheel nuts
             import math
             a = k * math.pi / 3
             tyre = tyre.fuse(cyl_y(x + 2.3 * math.cos(a), AXLE_Z + 2.3 * math.sin(a), 0.3,
-                                   outer - DETAIL - 0.1, outer))
+                                   outer - RIM_RECESS - 0.1, outer))
         tyre = tyre.removeSplitter()
-        rim_zone = cyl_y(x, AXLE_Z, RIM_R, outer - DETAIL - 0.6 / SCALE, outer + 1)   # 0.6 mm deep silver face
+        rim_zone = cyl_y(x, AXLE_Z, RIM_R, outer - RIM_RECESS - RIM_SILVER, outer + 1)   # silver face
         rim = tyre.common(rim_zone).removeSplitter()
         tyre = tyre.cut(rim_zone).removeSplitter()
         wheel_protos.setdefault(w, (x, tyre, rim))
@@ -612,11 +639,24 @@ silver_parts = fuse_all(rims)
 # Cab doors: the icon followed by the ALDOM wordmark in one line on the lower door, as in
 # the photo. The photo's tagline under it would be ~0.5 mm tall here, far too fine to
 # print, so it is left for a decal. u = 0 at the viewer's left end of the lettering.
-DOOR_WORD_W = 7.8                                    # wordmark width (smallest size whose strokes print)
+DOOR_WORD_W = 11.7 / SCALE                           # 11.7 mm real: smallest wordmark whose strokes print
 door_word_h = art_height(["wordmark"], DOOR_WORD_W)
-door_icon_h = door_word_h / 0.55                     # icon ~1.8x the letter height, as in the photo
-door_icon_w = door_icon_h * ((lambda b: (b[2] - b[0]) / (b[3] - b[1]))(_art_bounds(["icon"])))
+icon_aspect = (lambda b: (b[2] - b[0]) / (b[3] - b[1]))(_art_bounds(["icon"]))
 DOOR_LOGO_V, DOOR_LOGO_GAP, DOOR_LOGO_MARGIN = 12.4, 0.3, 0.6
+
+
+def door_space(margin, icon_h):
+    return (door_front(DOOR_LOGO_V + icon_h) - margin) - (DOOR_REAR + margin + 0.4)
+
+
+door_icon_h = door_word_h / 0.55                     # icon ~1.8x the letter height, as in the photo
+if door_icon_h * icon_aspect + DOOR_LOGO_GAP + DOOR_WORD_W > door_space(DOOR_LOGO_MARGIN, door_icon_h):
+    # small truck: tighter margins, and the icon shrinks just enough for the line to fit
+    DOOR_LOGO_MARGIN = 0.3
+    for _ in range(3):
+        door_icon_h = min(door_word_h / 0.55,
+                          (door_space(DOOR_LOGO_MARGIN, door_icon_h) - DOOR_LOGO_GAP - DOOR_WORD_W) / icon_aspect)
+door_icon_w = door_icon_h * icon_aspect
 door_icon = artwork(["icon"], door_icon_w, 0, DOOR_LOGO_V)
 door_word = artwork(["wordmark"], DOOR_WORD_W, door_icon_w + DOOR_LOGO_GAP, DOOR_LOGO_V)
 cab_logo_faces = door_icon["red"] + door_word["red"]
@@ -680,7 +720,7 @@ for fname, shp, tol in (("onepiece", whole, 0.02), ("white", white_shape, 0.02),
 doc.save()
 
 bb = scaled(whole).BoundBox
-print(f"OK size {bb.XLength:.1f} x {bb.YLength:.1f} x {bb.ZLength:.1f} mm; "
+print(f"OK {TRUCK_LENGTH:g} mm build in {OUT_DIR}: size {bb.XLength:.1f} x {bb.YLength:.1f} x {bb.ZLength:.1f} mm; "
       f"valid={whole.isValid()} solids={len(whole.Solids)} "
       f"cab={cab.isValid()} box={cargo.isValid()} chassis={running_gear.isValid()} "
       f"red={all_red.isValid()}/{len(all_red.Solids)} black_text={all_black_text.isValid()}/{len(all_black_text.Solids)}")
@@ -733,6 +773,11 @@ kit_chassis = kit_chassis.removeSplitter()
 kit_wheels = {}
 for w, name in ((FRONT_WHEEL_W, "front"), (REAR_WHEEL_W, "rear")):
     x, tyre, rim = wheel_protos[w]
+    if w < REAR_WHEEL_W:
+        # hidden collar on the inner face: makes the front wheels as tall as the rear ones
+        # when printed face up, so all the silver layers line up (fewer colour changes); it
+        # fills the empty space along the stub, so the wheel sits exactly where it did
+        tyre = tyre.fuse(cyl_y(x, AXLE_Z, 1.9, WHEEL_Y - (REAR_WHEEL_W - w), WHEEL_Y + 0.05))
     bore = cyl_y(x, AXLE_Z, 1.0 + CLEAR, WHEEL_Y - 1, WHEEL_Y + WHEEL_BORE)
     kit_wheels[name] = (tyre.cut(bore).removeSplitter(), rim)
 
@@ -815,6 +860,20 @@ for name, shp, y_off in layout:
     kit_doc.addObject("Part::Feature", name).Shape = shown
 kit_doc.recompute()
 kit_doc.saveAs(os.path.join(OUT_DIR, "ReeferTruck_kit.FCStd"))
+
+# Ready-made plate of all 8 wheels (4 front, 4 rear), black and silver files sharing coordinates
+plate = {"black": Mesh.Mesh(), "silver": Mesh.Mesh()}
+for row, kind in enumerate(("front", "rear")):
+    blk = Mesh.Mesh(os.path.join(KIT_DIR, f"wheel_{kind}_black.stl"))
+    sil = Mesh.Mesh(os.path.join(KIT_DIR, f"wheel_{kind}_silver.stl"))
+    pitch = blk.BoundBox.XLength + 4.0
+    for i in range(4):
+        for src, key in ((blk, "black"), (sil, "silver")):
+            m = src.copy()
+            m.translate(i * pitch, row * pitch, 0)
+            plate[key].addMesh(m)
+for key, m in plate.items():
+    m.write(os.path.join(KIT_DIR, f"wheels_plate_{key}.stl"))
 for name, shp, _ in layout:
     b = shp.BoundBox
     print(f"  {name[4:]:14s} {b.XLength:5.1f} x {b.YLength:5.1f} x {b.ZLength:5.1f} mm (print height {b.ZLength:.1f})")
