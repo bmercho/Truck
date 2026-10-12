@@ -1,7 +1,7 @@
 """Miniature refrigerated rigid truck (cab-over, 4 axles), for 3D printing.
 
 All geometry below is authored at a 100 mm design length; every export is scaled by
-SCALE (1.5 -> 150 mm). Values that must hold in real millimetres whatever the scale
+SCALE (1.25 -> the 125 mm truck). Values that must hold in real millimetres whatever the scale
 (fit clearance, colour inlay depth) are divided by SCALE where they are defined.
 
 Run headless:  freecadcmd.exe reefer_truck.py
@@ -18,7 +18,7 @@ import Mesh
 V = App.Vector
 
 # ---- Parameters ------------------------------------------------------------
-TRUCK_LENGTH = float(os.environ.get("TRUCK_LENGTH", "150"))   # mm; e.g. TRUCK_LENGTH=125 freecadcmd reefer_truck.py
+TRUCK_LENGTH = float(os.environ.get("TRUCK_LENGTH", "125"))   # mm; another size: TRUCK_LENGTH=130 freecadcmd reefer_truck.py
 SCALE = TRUCK_LENGTH / 100.0  # export scale from the 100 mm design
 LENGTH = 100.0                # overall design length, including bumper
 NOSE = LENGTH - 0.8           # cab front face (bumper sticks out 0.8)
@@ -49,8 +49,8 @@ BOX_Z = (11.0, 35.2)
 DETAIL = 0.4                  # depth of engraved panel lines / recesses
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
-# the 150 mm build lives in the project folder; other lengths get their own folder (e.g. 125mm\)
-OUT_DIR = SCRIPT_DIR if TRUCK_LENGTH == 150 else os.path.join(SCRIPT_DIR, f"{TRUCK_LENGTH:g}mm")
+# each length gets its own folder (e.g. 125mm\)
+OUT_DIR = os.path.join(SCRIPT_DIR, f"{TRUCK_LENGTH:g}mm")
 os.makedirs(OUT_DIR, exist_ok=True)
 ARTWORK = json.load(open(os.path.join(SCRIPT_DIR, "aldom_artwork.json")))
 # Rear door logo (primary stacked logo with tagline): 25.5 mm wide in real terms, so its
