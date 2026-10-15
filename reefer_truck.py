@@ -53,13 +53,14 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals
 OUT_DIR = os.path.join(SCRIPT_DIR, f"{TRUCK_LENGTH:g}mm")
 os.makedirs(OUT_DIR, exist_ok=True)
 ARTWORK = json.load(open(os.path.join(SCRIPT_DIR, "aldom_artwork.json")))
-# Rear door logo (primary stacked logo with tagline): 25.5 mm wide in real terms, so its
-# tagline prints, but never wider than the space between the door hinge lines.
-_rb = [p for f in ARTWORK["stacked_tagline"] for sp in f["subpaths"] for seg in sp for p in seg[1:]]
-REAR_ASPECT = (max(q[1] for q in _rb) - min(q[1] for q in _rb)) / (max(q[0] for q in _rb) - min(q[0] for q in _rb))
-REAR_W = min(25.5 / SCALE, 18.4)
-REAR_V = 17.0
-REAR_H = REAR_W * REAR_ASPECT
+# Final truck artwork from Aldom (Aldom-3D-Truck_Artwork: 1_Truck-Side_L, 2_Truck-Side_R,
+# 3_Truck-Back, 4_Truck-Top), extracted to aldom_final_artwork.json
+FINAL = json.load(open(os.path.join(SCRIPT_DIR, "aldom_final_artwork.json")))
+# rear doors: the back panel scaled to fit the door height and width; the lock bars break round its logo
+K_BACK = min(WIDTH / FINAL["back"]["size"][0], (BOX_Z[1] - BOX_Z[0]) / FINAL["back"]["size"][1])
+_rb = [p[1] for f in FINAL["back"]["red"] for sp in f["subpaths"] for seg in sp for p in seg[1:]]
+REAR_V = BOX_Z[0] + min(_rb) * K_BACK
+REAR_H = (max(_rb) - min(_rb)) * K_BACK
 
 
 # ---- Helpers ---------------------------------------------------------------
@@ -150,7 +151,10 @@ cab = cab.cut(cavity)
 
 # Roof deflector: rises in a smooth curve from mid-roof to ROOF_TOP at the back
 DEFL_HW = 9.5                 # half width (narrower than the cab, as in the front view)
-DEFL_X = (CAB_X0, 90.0)       # back and front of the deflector
+# The deflector's back reaches past the cab to the reefer unit's front face, leaving only
+# a 0.1 mm glue gap, so the top of the cab is braced against the body.
+CAB_BRACE_X = (CAB_X0 - 0.3) + 0.1 / SCALE          # reefer front face (GAP_FRONT) + glue gap
+DEFL_X = (CAB_BRACE_X, 90.0)  # back and front of the deflector
 bz = Part.BezierCurve()
 bz.setPoles([V(DEFL_X[1], 0, CAB_ROOF - 0.4), V(88.5, 0, CAB_ROOF - 0.2), V(86.5, 0, ROOF_TOP), V(84.0, 0, ROOF_TOP)])
 defl_wire = Part.Wire([Part.LineSegment(V(DEFL_X[0], 0, CAB_ROOF - 0.4), V(DEFL_X[1], 0, CAB_ROOF - 0.4)).toShape(),
@@ -163,11 +167,31 @@ deflector = fillet(deflector, (1.5, 1.0, 0.6), lambda e: e.BoundBox.YLength < 1e
                    and e.BoundBox.XMax > DEFL_X[0] + 0.1, "deflector sides")
 cab = cab.fuse(deflector)
 
-# Windscreen opening (through the wall)
-WS_OPEN = (WS_BOTTOM + 0.5, CAB_ROOF - 2.4)             # the glass carries on up into the roof curve
-cab = cab.cut(prism_xz([(ws_x(WS_OPEN[0]) + 1, WS_OPEN[0]), (ws_x(WS_OPEN[1]) + 1, WS_OPEN[1]),
-                        (ws_x(WS_OPEN[1]) - 3, WS_OPEN[1]), (ws_x(WS_OPEN[0]) - 3, WS_OPEN[0])],
-                       -HW + 1.4, HW - 1.4))                  # ~88% of the cab width, as in the photo
+# Windows are solid (Aldom feedback): black glass panels sitting flush in shallow pockets.
+# In the kit they are separate flat black pieces, so the white cab has no colour changes.
+GLASS_T = 0.6 / SCALE         # glass 0.6 mm thick, in 0.6 mm deep pockets
+GLASS_CLEAR = 0.1 / SCALE     # fit clearance round each panel (kit)
+ws_n = V(1, 0, WS_RAKE).normalize()                  # windscreen's outward normal
+# windscreen glass covers the flat part of the windscreen: above the small front radius,
+# below the roof curve, and clear of the rounded front corners
+WS_GLASS_Z = (WS_BOTTOM + 0.4, 25.3)
+WS_GLASS_HW = HW - CORNER_R - 0.3
+
+
+def ws_panel(grow, out, depth):
+    """A panel lying in the windscreen plane, grown by `grow` all round, from `out` outside
+    the windscreen surface to `depth` inside it."""
+    dz = grow * ws_n.x                               # growing along the slope, expressed in z
+    z0, z1, w = WS_GLASS_Z[0] - dz, WS_GLASS_Z[1] + dz, WS_GLASS_HW + grow
+    pts = [V(ws_x(z0), -w, z0), V(ws_x(z0), w, z0), V(ws_x(z1), w, z1), V(ws_x(z1), -w, z1)]
+    face = Part.Face(Part.makePolygon(pts + [pts[0]]))
+    face.translate(ws_n * out)
+    solid = face.extrude(ws_n * -(out + depth))
+    return fillet(solid, (0.6, 0.4), lambda e: abs(e.Length - (out + depth)) < 1e-6, "windscreen glass corners")
+
+
+glass_ws = ws_panel(0.0, 0.0, GLASS_T)
+cab = cab.cut(glass_ws)
 
 # Cab sides, measured on the photo's side view: a door whose front edge leans back with the
 # windscreen pillar, a side window with a raked front edge and a bottom edge that drops
@@ -211,55 +235,31 @@ upper_panel = xz_face([(CAB_X0 + 0.9, 16.8), (DOOR_REAR - 0.8, 16.8), (DOOR_REAR
                        (CAB_X0 + 0.9, DOOR_TOP - 0.2)], 0.6)
 hatch = xz_face([(CAB_X0 + 0.9, DOOR_BOTTOM + 0.3), (DOOR_REAR - 0.8, DOOR_BOTTOM + 0.3),
                  (DOOR_REAR - 0.8, 16.2), (CAB_X0 + 0.9, 16.2)], 0.5)
-handle = xz_face([(DOOR_REAR + 0.5, 15.0), (DOOR_REAR + 1.3, 15.0), (DOOR_REAR + 1.3, 15.8),   # above the lettering
-                  (DOOR_REAR + 0.5, 15.8)])
+handle = xz_face([(DOOR_REAR + 0.5, 12.6), (DOOR_REAR + 1.3, 12.6), (DOOR_REAR + 1.3, 13.4),
+                  (DOOR_REAR + 0.5, 13.4)])
 grooves = fuse_all([outline(door_face), outline(upper_panel, 0.3), outline(hatch, 0.3), handle])
 cab = cab.cut(into_sides(grooves, DETAIL))
-cab = cab.cut(into_sides(win_face, CAB_WALL + 1))                   # window: through the wall
+# side windows: black glass panels flush in pockets (one shape, mirrored for the right side)
+glass_side = win_face.extrude(V(0, GLASS_T, 0))
+glass_side.translate(V(0, HW - GLASS_T, 0))
+cab = cab.cut(glass_side).cut(mirror_y(glass_side))
+glass_all = fuse_all([glass_ws, glass_side, mirror_y(glass_side)])
 
-# Tall mirror at the front of the window, on two arms from the pillar
-for side in (1, -1):
-    m = lambda shp: shp if side > 0 else mirror_y(shp)
-    head = box(94.9, 95.9, HW + 1.5, HW + 2.7, 17.8, 24.6)
-    arms = [cyl_y(95.4, z, 0.4, HW - 0.8, HW + 2.1) for z in (18.6, 23.8)]
-    cab = cab.fuse(m(fuse_all([head] + arms)))
+# Solid mirrors (Aldom feedback): one block joined to the cab side along its whole height,
+# instead of a head on two thin arms. Its underside slopes at 45 degrees so it prints
+# without support.
+MIRROR_X = (95.0, 96.0)
+mirror_prof = [(HW - 1.1, 15.8), (HW + 2.7, 15.8 + 3.8), (HW + 2.7, 24.2), (HW - 1.1, 24.2)]
+mirror_face = Part.Face(Part.makePolygon([V(MIRROR_X[0], y, z) for y, z in mirror_prof] +
+                                         [V(MIRROR_X[0], mirror_prof[0][0], mirror_prof[0][1])]))
+mirror_block = mirror_face.extrude(V(MIRROR_X[1] - MIRROR_X[0], 0, 0))
+cab = cab.fuse(mirror_block).fuse(mirror_y(mirror_block))
 
-# ---- Cab interior (visible through the windows) -----------------------------
-DRIVER_Y = -5.5               # right-hand drive: driver on the -Y (right) side
-SEAT_W = 6.0
-inner_front = NOSE - CAB_WALL
+# ---- Cab interior ------------------------------------------------------------
+# With solid windows the interior can't be seen, so there are no seats, dashboard or
+# steering wheel any more; only the bosses for the locating dowels remain.
 parts = []
-# Dashboard: sloped top that stays below the windscreen opening
-parts.append(prism_xz([(93.8, CAB_FLOOR), (inner_front + 0.2, CAB_FLOOR), (inner_front + 0.2, WS_BOTTOM - 0.4),
-                       (95.8, WS_BOTTOM + 0.6), (93.8, WS_BOTTOM + 0.2)], -HW + CAB_WALL - 0.1, HW - CAB_WALL + 0.1))
-# Steering column and wheel, tilted towards the driver
-wheel_c = V(92.4, DRIVER_Y, 19.0)
-col_dir = V(-1, 0, 0.55).normalize()
-col_base = V(95.4, DRIVER_Y, WS_BOTTOM + 0.3)        # inside the dashboard
-parts.append(Part.makeCylinder(0.5, (col_base - wheel_c).Length + 0.3, wheel_c, (col_base - wheel_c).normalize()))
-# A solid wheel (disc, rim and hub) so it survives handling, standing on a vertical column
-# from the floor to its lowest point (as in a cab-over truck). The wheel then prints upwards
-# from the top of the column and needs no support inside the cab.
-SW_R, SW_TUBE = 2.2, 0.55
-parts.append(Part.makeTorus(SW_R, SW_TUBE, wheel_c, col_dir))                     # rim
-parts.append(Part.makeCylinder(SW_R, 0.5, wheel_c - col_dir * 0.25, col_dir))    # disc
-parts.append(Part.makeCylinder(0.9, 0.9, wheel_c - col_dir * 0.2, col_dir))      # hub, on the driver's side
-down = V(0, 0, -1)
-lowest = (down - col_dir * down.dot(col_dir)).normalize()                         # down, within the wheel plane
-wheel_bottom = wheel_c + lowest * SW_R
-parts.append(Part.makeCylinder(1.1, wheel_bottom.z - CAB_FLOOR + 0.3,
-                               V(wheel_bottom.x, wheel_bottom.y, CAB_FLOOR - 0.1)))  # column to the floor
-# Two seats: cushion + reclined backrest
-for sy in (DRIVER_Y, -DRIVER_Y):
-    y0, y1 = sy - SEAT_W / 2, sy + SEAT_W / 2
-    cushion = box(83.6, 89.6, y0, y1, CAB_FLOOR, 15.0)
-    cushion = fillet(cushion, (0.6, 0.4), lambda e: e.BoundBox.ZMin > 14.9, "seat cushion")
-    back = prism_xz([(82.0, CAB_FLOOR), (84.6, CAB_FLOOR), (84.6, 15.5), (83.3, 25.0), (81.2, 25.0)], y0, y1)
-    back = fillet(back, (0.6, 0.4), lambda e: e.BoundBox.ZMin > 24.9, "seat back")
-    parts += [cushion, back]
-# Centre console between the seats
-parts.append(box(86.0, 94.6, -1.8, 1.8, CAB_FLOOR, 13.2))
-# Bosses behind the seats for the dowels that locate the cab on the chassis (kit)
+# Bosses for the dowels that locate the cab on the chassis (kit)
 CAB_DOWELS = [(79.0, -7.5), (79.0, 7.5)]
 for x, y in CAB_DOWELS:
     parts.append(Part.makeCylinder(1.5, 2.0, V(x, y, CAB_FLOOR - 0.1)))
@@ -448,114 +448,76 @@ def check_printable(label, shapes):
     thin_report.append((label, len(faces), results.count(True), results.count(None)))
 
 
-# -- Box sides, u = 0 at the viewer's left end of the box. Art stays within u 2.5..69.5,
-#    clear of the rear door panel and the frame lines (v 12.2..34.0).
-ICON_W, ICON_U, ICON_V = 14.4, 2.8, 17.3
-icon_h = art_height(["icon"], ICON_W)
-BLOCK_W, BLOCK_U = 21.0, 18.4                       # wordmark + tagline block
-block_h = art_height(["wordmark", "tagline"], BLOCK_W)
-block_v = ICON_V + icon_h / 2 - block_h / 2         # centred on the icon
-side_icon = artwork(["icon"], ICON_W, ICON_U, ICON_V)
-side_block = artwork(["wordmark", "tagline"], BLOCK_W, BLOCK_U, block_v)
-
-# Diagonal stripe with the step in its left edge
-STRIPE = [(43.0, 11.9), (50.8, 11.9), (59.7, 34.3), (53.5, 34.3), (48.95, 23.1), (47.55, 23.1)]
-stripe = poly_face(STRIPE)
-
-SLOGAN = ["Built on", "Experience.", "Driven by", "Innovation."]
-SLOGAN_U, SLOGAN_TOP = 58.4, 28.8
-SLOGAN_RIGHT = 69.5                                  # end of the box side (clear of the rear door panel)
-SLOGAN_CAP = 2.175 / SCALE                           # 2.2 mm capitals: thinnest stroke (the e's bar) ~0.26 mm
-slogan_base = [SLOGAN_TOP - SLOGAN_CAP - i * SLOGAN_CAP * 1.55 for i in range(len(SLOGAN))]
-# narrowed (not shrunk) if it would not fit: that keeps the horizontal strokes, the thinnest ones,
-# at full thickness
-_nat = [text_face(line, SLOGAN_CAP).BoundBox.XLength for line in SLOGAN]
-SLOGAN_SQUEEZE = min(1.0, (SLOGAN_RIGHT - SLOGAN_U) / max(_nat))
-slogan = [placed(text_face(line, SLOGAN_CAP) if SLOGAN_SQUEEZE == 1.0 else text_face(line, SLOGAN_CAP, n * SLOGAN_SQUEEZE),
-                 SLOGAN_U, v) for line, v, n in zip(SLOGAN, slogan_base, _nat)]
-slogan_dash = poly_face([(SLOGAN_U, slogan_base[-1] - 1.6), (SLOGAN_U + 3.0, slogan_base[-1] - 1.6),
-                         (SLOGAN_U + 3.0, slogan_base[-1] - 1.1), (SLOGAN_U, slogan_base[-1] - 1.1)])
-
-# Grey A pattern (brand guidelines, back cover): rows of the icon alternating upright and
-# upside down, each row starting with the opposite one, in a diagonal band that runs
-# parallel to the stripe and disappears under it.
-PAT_W = 3.0
-PAT_H = art_height(["icon"], PAT_W)
-PAT_PITCH, PAT_ROW = 1.035 * PAT_W, 1.41 * PAT_H    # spacing measured on the guidelines page
-BAND_SLOPE = (STRIPE[5][0] - STRIPE[0][0]) / (STRIPE[5][1] - STRIPE[0][1])
-BAND_U0, BAND_V = 37.0, (12.2, 34.0)                # band's left edge at v = 11.9, and its height
-band_left = lambda v: BAND_U0 + (v - 11.9) * BAND_SLOPE
-BAND_W = 12.0                                       # reaches under the stripe, not past it
-band = poly_face([(band_left(BAND_V[0]), BAND_V[0]), (band_left(BAND_V[0]) + BAND_W, BAND_V[0]),
-                  (band_left(BAND_V[1]) + BAND_W, BAND_V[1]), (band_left(BAND_V[1]), BAND_V[1])])
-keep_out = poly_face([(BLOCK_U - 0.8, block_v - 0.8), (BLOCK_U + BLOCK_W + 0.8, block_v - 0.8),
-                      (BLOCK_U + BLOCK_W + 0.8, block_v + block_h + 0.8), (BLOCK_U - 0.8, block_v + block_h + 0.8)])
-icon_unit = artwork(["icon"], PAT_W, 0, 0)["red"][0]
-pattern = []
-row, v = 0, BAND_V[0] - PAT_H
-while v < BAND_V[1]:
-    col, u = 0, band_left(v) - 2 * PAT_PITCH
-    while u < STRIPE[3][0] + PAT_PITCH:
-        f = icon_unit.copy()
-        if (row + col) % 2:
-            f.rotate(V(PAT_W / 2, PAT_H / 2, 0), V(0, 0, 1), 180)
-        f.translate(V(u, v, 0))
-        piece = f.common(band).cut(stripe).cut(keep_out)
-        # drop slivers left by the clipping: they would not print and look ragged
-        for pf in piece.Faces:
-            if pf.Area > 0.3 * icon_unit.Area and too_thin(pf) is False:
-                pattern.append(pf)
-        col, u = col + 1, u + PAT_PITCH
-    row, v = row + 1, v + PAT_ROW
-
-side_red = side_icon["red"] + side_block["red"] + [stripe, slogan_dash]
-side_black = side_block["black"] + slogan
-side_grey = pattern
-
-# -- Rear doors: primary stacked logo with tagline, centred (u = 0 at the centre line)
-rear = artwork(["stacked_tagline"], REAR_W, -REAR_W / 2, REAR_V)
+# -- Final artwork on the box: each panel scaled uniformly (never stretched) to fit its face.
+#    Panel coordinates: x to the right and v up as seen from outside; the top panel is drawn
+#    with the truck's front at the top. The sides and roof stop 2.5 short of the rear end so
+#    no colour lands on the rear door panel's edges (they print upright in the kit).
+ART_X = (BOX_X[0] + 2.5, BOX_X[1])
+K_SIDE = (ART_X[1] - ART_X[0]) / FINAL["side_left"]["size"][0]
+SIDE_Z0 = BOX_Z[0] + ((BOX_Z[1] - BOX_Z[0]) - FINAL["side_left"]["size"][1] * K_SIDE) / 2
+K_TOP = (ART_X[1] - ART_X[0]) / FINAL["top"]["size"][1]
 
 
-def rear_panel(art):
-    return to_panel(art, V(BOX_X[0], 0, 0), V(0, -1, 0), V(-1, 0, 0))
+def art_faces(panel, colour, k):
+    """One colour of a final-artwork panel as faces in the XY plane, scaled by k."""
+    faces = []
+    for fill in FINAL[panel].get(colour, []):
+        wires = []
+        for sp in fill["subpaths"]:
+            edges = []
+            for seg in sp:
+                pts = [V(q[0] * k, q[1] * k, 0) for q in seg[1:]]
+                if seg[0] == "L":
+                    if (pts[1] - pts[0]).Length > 1e-7:
+                        edges.append(Part.LineSegment(pts[0], pts[1]).toShape())
+                else:
+                    bz = Part.BezierCurve()
+                    bz.setPoles(pts)
+                    edges.append(bz.toShape())
+            wires.append(Part.Wire(edges))
+        faces += Part.makeFace(wires, "Part::FaceMakerBullseye").Faces
+    return faces
 
 
-for label, faces in (("box icon + wordmark", side_icon["red"] + side_block["red"]),
-                     ("box tagline", side_block["black"]),
-                     ("grey A pattern", pattern), ("rear logo (red)", rear["red"]),
-                     ("rear tagline", rear["black"])):
-    check_printable(label, faces)
+def place_art(faces, origin, u_dir, v_dir):
+    """Map XY artwork onto a face of the truck (X along u_dir, Y along v_dir, from origin) and
+    inlay it INLAY_DEPTH deep. u_dir x v_dir is the outward normal, so it reads correctly
+    (not mirrored) from outside."""
+    normal = u_dir.cross(v_dir)
+    m = App.Matrix(u_dir.x, v_dir.x, normal.x, origin.x,
+                   u_dir.y, v_dir.y, normal.y, origin.y,
+                   u_dir.z, v_dir.z, normal.z, origin.z, 0, 0, 0, 1)
+    solids = []
+    for f in faces:
+        g = f.copy()
+        g.transformShape(m)
+        g.translate(normal * 0.05)
+        solids.append(g.extrude(normal * -(INLAY_DEPTH + 0.05)))
+    return fuse_all(solids) if solids else Part.Shape()
 
-inlays_red = fuse_all([both_sides(side_red, BOX_X[1], BOX_X[0]), rear_panel(rear["red"])])
-inlays_black = fuse_all([both_sides(side_black, BOX_X[1], BOX_X[0]), rear_panel(rear["black"])])
-inlays_grey = both_sides(side_grey, BOX_X[1], BOX_X[0])
-red_parts = inlays_red.common(cargo).removeSplitter()      # keeps door grooves as grooves
-black_text = inlays_black.common(cargo).removeSplitter()
-grey_parts = inlays_grey.common(cargo).removeSplitter()
-cargo = cargo.cut(inlays_red).cut(inlays_black).cut(inlays_grey).removeSplitter()
 
-# QR code on the roof: copied module for module from the brand guidelines' back cover
-# (aldom_qr.json, decodes to https://aldom.com.au/). Black squares inlaid in the white roof,
-# with the white quiet zone round them; read from above. In the kit it is a separate panel.
+UP, FWD = V(0, 0, 1), V(1, 0, 0)
+FACES = {   # panel: (origin of its bottom-left corner, u direction, v direction)
+    "side_left": (V(ART_X[1], HW, SIDE_Z0), V(-1, 0, 0), UP),     # front at the viewer's left
+    "side_right": (V(ART_X[0], -HW, SIDE_Z0), FWD, UP),           # front at the viewer's right
+    "back": (V(BOX_X[0], FINAL["back"]["size"][0] * K_BACK / 2, BOX_Z[0]), V(0, -1, 0), UP),
+    "top": (V(ART_X[0], FINAL["top"]["size"][0] * K_TOP / 2, BOX_Z[1]), V(0, -1, 0), FWD),  # front at the top
+}
+K = {"side_left": K_SIDE, "side_right": K_SIDE, "back": K_BACK, "top": K_TOP}
+art = {(pn, c): art_faces(pn, c, K[pn]) for pn in FACES for c in ("red", "black", "grey")}
+
+# Roof: the QR code (aldom_qr.json, decodes to https://aldom.com.au/) sits on the artwork's
+# white rounded panel, which is cut out of the red diagonal
 QR = json.load(open(os.path.join(SCRIPT_DIR, "aldom_qr.json")))
-# 0.96 mm squares (easy to print and scan), smaller only if the code would not fit the roof
-QR_MODULE = min(0.96 / SCALE, (WIDTH - 2.4) / (len(QR) + 8))
-QR_QUIET = 4                  # white border, in modules (the QR standard's minimum)
-QR_PANEL_T = 0.8              # panel thickness; it sits flush in a recess in the roof
-QR_CX = 38.0                  # centred on the roof (between the rear door panel and the front)
-qr_w = (len(QR) + 2 * QR_QUIET) * QR_MODULE
-
-
-def qr_square(w, z0, z1):
-    sq = box(QR_CX - w / 2, QR_CX + w / 2, -w / 2, w / 2, z0, z1)
-    return fillet(sq, (0.6, 0.4), lambda e: e.BoundBox.ZLength > z1 - z0 - 0.01, "qr corners")
-
-
-qr_panel = qr_square(qr_w, BOX_Z[1] - QR_PANEL_T, BOX_Z[1])
-# Seen from above with the truck's front at the top, the grid's columns run towards -Y
-# and its rows towards -X (so the code is not mirrored).
-qr_rects = []
-half = len(QR) * QR_MODULE / 2
+_q, _w = FINAL["top"]["qr"], FINAL["top"]["rounded_white"][0]
+assert _q["modules"] == len(QR)
+QR_MODULE = _q["pitch"] * K_TOP
+white_panel = poly_face([(_w["x"] * K_TOP, _w["v"] * K_TOP), ((_w["x"] + _w["w"]) * K_TOP, _w["v"] * K_TOP),
+                        ((_w["x"] + _w["w"]) * K_TOP, (_w["v"] + _w["h"]) * K_TOP),
+                        (_w["x"] * K_TOP, (_w["v"] + _w["h"]) * K_TOP)])
+white_panel = white_panel.makeOffset2D(-_w["r"] * K_TOP, join=2).makeOffset2D(_w["r"] * K_TOP, join=0)
+art[("top", "red")] = [g for f in art[("top", "red")] for g in f.cut(white_panel).Faces]
+qr_faces = []                  # runs of black modules; row 0 at the top edge ("v" is the code's top)
 for r, row in enumerate(QR):
     c = 0
     while c < len(row):
@@ -563,14 +525,52 @@ for r, row in enumerate(QR):
             c1 = c
             while c1 < len(row) and row[c1]:
                 c1 += 1
-            qr_rects.append(box(QR_CX + half - (r + 1) * QR_MODULE, QR_CX + half - r * QR_MODULE,
-                                half - c1 * QR_MODULE, half - c * QR_MODULE,
-                                BOX_Z[1] - INLAY_DEPTH, BOX_Z[1] + 0.05))
+            x0, x1 = _q["x"] * K_TOP + c * QR_MODULE, _q["x"] * K_TOP + c1 * QR_MODULE
+            y1 = _q["v"] * K_TOP - r * QR_MODULE
+            qr_faces.append(poly_face([(x0, y1 - QR_MODULE), (x1, y1 - QR_MODULE), (x1, y1), (x0, y1)]))
             c = c1
         else:
             c += 1
-qr_black = fuse_all(qr_rects).common(cargo).removeSplitter()
-cargo = cargo.cut(qr_black).removeSplitter()
+art[("top", "black")] = qr_faces
+
+for label, key in (("left side red", ("side_left", "red")), ("left side black", ("side_left", "black")),
+                   ("left side grey", ("side_left", "grey")), ("right side red", ("side_right", "red")),
+                   ("right side black", ("side_right", "black")), ("right side grey", ("side_right", "grey")),
+                   ("back red", ("back", "red")), ("roof red", ("top", "red")), ("roof QR", ("top", "black"))):
+    if art[key]:
+        check_printable(label, art[key])
+
+
+def inlay(panels, colour):
+    return fuse_all([place_art(art[(pn, colour)], *FACES[pn]) for pn in panels if art[(pn, colour)]] or [Part.Shape()])
+
+
+BOX_PANELS = ("side_left", "side_right", "back")
+inlays_red = inlay(BOX_PANELS, "red")
+inlays_black = inlay(BOX_PANELS, "black")
+inlays_grey = inlay(BOX_PANELS, "grey").cut(inlays_red)     # never two colours in one place
+roof_red_in, roof_black_in = inlay(("top",), "red"), inlay(("top",), "black")
+red_parts = inlays_red.common(cargo).removeSplitter()      # keeps door grooves as grooves
+black_text = inlays_black.common(cargo).removeSplitter()
+grey_parts = inlays_grey.common(cargo).removeSplitter()
+roof_red = roof_red_in.common(cargo).removeSplitter()
+roof_black = roof_black_in.common(cargo).removeSplitter()
+cargo = cargo.cut(inlays_red).cut(inlays_black).cut(inlays_grey).cut(roof_red_in).cut(roof_black_in).removeSplitter()
+
+# In the kit the roof artwork is a separate panel, printed face up (all its colour in the top
+# layers) and glued into a recess in the box top: on the box, which prints on its side, the
+# roof is an upright face and its red diagonal and QR code would need hundreds of colour changes.
+ROOF_PANEL_T = 0.8
+ROOF_PANEL = (ART_X[0] - 0.2, BOX_X[1] - 1.0, HW - 0.8)   # x from, x to, half width (inside the rounded edges)
+
+
+def roof_slab(grow, z0, z1):
+    x0, x1, hw = ROOF_PANEL
+    slab = box(x0 - grow, x1 + grow, -hw - grow, hw + grow, z0, z1)
+    return fillet(slab, (0.6 + grow, 0.4 + grow), lambda e: e.BoundBox.ZLength > z1 - z0 - 0.01, "roof panel corners")
+
+
+roof_panel = roof_slab(0.0, BOX_Z[1] - ROOF_PANEL_T, BOX_Z[1])
 
 # ---- Chassis & running gear (black) -----------------------------------------
 frame = cbox(1.0, 99.0, FRAME_W, FRAME_Z[0], FRAME_Z[1])
@@ -586,7 +586,8 @@ for dy in (-1, 1):
     lamps.append(box(LENGTH - DETAIL, LENGTH + 1, dy * 8.2 - 0.6, dy * 8.2 + 0.6, 3.9, 4.6))   # fog light
 lamps.append(box(LENGTH - DETAIL, LENGTH + 1, -3.2, 3.2, 3.3, 4.5))                           # number plate
 bumper = bumper.cut(fuse_all(lamps))
-underrun = cbox(0.0, 2.0, WIDTH - 2, 3.5, 5.5)
+# rear underrun bar, with a second bar directly in front of it (Aldom feedback): twice as thick
+underrun = cbox(0.0, 2.0, WIDTH - 2, 3.5, 5.5).fuse(cbox(2.0, 4.0, WIDTH - 2, 3.5, 5.5))
 underrun_brackets = [box(1.0, 3.0, y - 0.6, y + 0.6, 5.0, FRAME_Z[0] + 0.1) for y in (-5.0, 5.0)]
 rear_lights = [box(0.0, 0.8, y0, y0 + 2.5, 5.5, 6.4) for y0 in (-10.5, 8.0)]
 side_box = cbox(42.5, 59.5, WIDTH - 2, 5.0, BOX_Z[0] + 0.1)                 # skirt / battery box
@@ -616,7 +617,8 @@ wheel_protos = {}             # tyre width -> (x, black tyre, silver rim) on the
 for x, w in AXLES:
     for side in (1, -1):
         tyre = cyl_y(x, AXLE_Z, WHEEL_R, WHEEL_Y, WHEEL_Y + w)
-        tyre = fillet(tyre, (0.6, 0.4), lambda e: True)
+        # round only the outer edge: the inner face prints on the plate and needs a flat, full-size base
+        tyre = fillet(tyre, (0.6, 0.4), lambda e: e.BoundBox.YLength < 1e-6 and e.BoundBox.YMin > WHEEL_Y + 0.01)
         outer = WHEEL_Y + w
         tyre = tyre.cut(cyl_y(x, AXLE_Z, RIM_R, outer - RIM_RECESS, outer + 1))           # rim recess
         tyre = tyre.fuse(cyl_y(x, AXLE_Z, 1.5, outer - RIM_RECESS - 0.1, outer + 0.2))   # hub cap
@@ -636,37 +638,7 @@ for x, w in AXLES:
 running_gear = fuse_all([chassis] + wheels)
 silver_parts = fuse_all(rims)
 
-# Cab doors: the icon followed by the ALDOM wordmark in one line on the lower door, as in
-# the photo. The photo's tagline under it would be ~0.5 mm tall here, far too fine to
-# print, so it is left for a decal. u = 0 at the viewer's left end of the lettering.
-DOOR_WORD_W = 11.7 / SCALE                           # 11.7 mm real: smallest wordmark whose strokes print
-door_word_h = art_height(["wordmark"], DOOR_WORD_W)
-icon_aspect = (lambda b: (b[2] - b[0]) / (b[3] - b[1]))(_art_bounds(["icon"]))
-DOOR_LOGO_V, DOOR_LOGO_GAP, DOOR_LOGO_MARGIN = 12.4, 0.3, 0.6
-
-
-def door_space(margin, icon_h):
-    return (door_front(DOOR_LOGO_V + icon_h) - margin) - (DOOR_REAR + margin + 0.4)
-
-
-door_icon_h = door_word_h / 0.55                     # icon ~1.8x the letter height, as in the photo
-if door_icon_h * icon_aspect + DOOR_LOGO_GAP + DOOR_WORD_W > door_space(DOOR_LOGO_MARGIN, door_icon_h):
-    # small truck: tighter margins, and the icon shrinks just enough for the line to fit
-    DOOR_LOGO_MARGIN = 0.3
-    for _ in range(3):
-        door_icon_h = min(door_word_h / 0.55,
-                          (door_space(DOOR_LOGO_MARGIN, door_icon_h) - DOOR_LOGO_GAP - DOOR_WORD_W) / icon_aspect)
-door_icon_w = door_icon_h * icon_aspect
-door_icon = artwork(["icon"], door_icon_w, 0, DOOR_LOGO_V)
-door_word = artwork(["wordmark"], DOOR_WORD_W, door_icon_w + DOOR_LOGO_GAP, DOOR_LOGO_V)
-cab_logo_faces = door_icon["red"] + door_word["red"]
-check_printable("cab door lettering", cab_logo_faces)
-logo_w = door_icon_w + DOOR_LOGO_GAP + DOOR_WORD_W
-# left side: reads from the door's front edge backwards; right side: from its rear edge forwards
-cab_in_red = both_sides(cab_logo_faces, door_front(DOOR_LOGO_V + door_icon_h) - DOOR_LOGO_MARGIN,
-                        DOOR_REAR + DOOR_LOGO_MARGIN + 0.4)
-cab_red = cab_in_red.common(cab).removeSplitter()
-cab = cab.cut(cab_in_red).removeSplitter()
+# No branding on the cab (Aldom feedback): all of it is on the refrigerated body.
 
 # Lower cab is black, as in the photo: the front below the white panel (grille band), the
 # wheel arch trim and the step under the door. The cab is split at the door-bottom line and
@@ -686,8 +658,8 @@ def scaled(shape):
     return c
 
 
-all_red = red_parts.fuse(cab_red).removeSplitter()
-all_black_text = black_text.fuse(reefer_black).fuse(qr_black).removeSplitter()
+all_red = red_parts.fuse(roof_red).removeSplitter()
+all_black_text = black_text.fuse(reefer_black).fuse(roof_black).fuse(glass_all).removeSplitter()
 white_shape = cab.fuse(cargo).removeSplitter()
 # Multi-colour STLs must not overlap, or the slicer has to guess which colour wins:
 # trim the black running gear where the frame runs up inside the white cab and box.
@@ -730,13 +702,14 @@ print(f"printability (strokes under {MIN_FEATURE * SCALE:.2f} mm): " +
 
 # ---- Kit: single-colour pieces that glue together (for batch printing) -----------
 #   chassis  black                prints upside down on the flat box seat (tree supports, build plate only)
-#   cab      white + red          prints upright (door logo is on the walls)
+#   cab      white                prints upright
+#   glass    black                windscreen x1 + side window x2, flat; press into the cab's pockets
 #   box      white + red + black + grey  prints lying on its side: artwork only in the first/last layers
 #   door     white + red + black  rear door panel, prints flat with the outer face up
 #   reefer   white + black        fridge unit, prints front face up (black grille in the top layers)
 #   wheels   black + silver       print 4 front + 4 rear, outer face up (silver rim in the top layers);
 #                                 they push onto axle stubs on the chassis
-#   qr       white + black        QR code panel for the roof, prints face up (black in the top layers)
+#   roof     white + red + black  roof artwork panel (incl. QR code), prints face up (colour in the top layers)
 # Each piece is exported already in its print orientation (and at SCALE); the colour
 # files of one piece share coordinates, so load them together as one multi-part object.
 KIT_DIR = os.path.join(OUT_DIR, "kit")
@@ -774,20 +747,25 @@ kit_wheels = {}
 for w, name in ((FRONT_WHEEL_W, "front"), (REAR_WHEEL_W, "rear")):
     x, tyre, rim = wheel_protos[w]
     if w < REAR_WHEEL_W:
-        # hidden collar on the inner face: makes the front wheels as tall as the rear ones
-        # when printed face up, so all the silver layers line up (fewer colour changes); it
-        # fills the empty space along the stub, so the wheel sits exactly where it did
-        tyre = tyre.fuse(cyl_y(x, AXLE_Z, 1.9, WHEEL_Y - (REAR_WHEEL_W - w), WHEEL_Y + 0.05))
+        # full-diameter spacer on the inner face: makes the front wheels as tall as the rear
+        # ones when printed face up, so all the silver layers line up (fewer colour changes),
+        # and gives them a full flat base on the plate (a narrow collar here left them standing
+        # on ~12 mm2 and they came loose). Hidden against the chassis; the wheel sits where it did.
+        tyre = tyre.fuse(cyl_y(x, AXLE_Z, WHEEL_R, WHEEL_Y - (REAR_WHEEL_W - w), WHEEL_Y + 0.05))
     bore = cyl_y(x, AXLE_Z, 1.0 + CLEAR, WHEEL_Y - 1, WHEEL_Y + WHEEL_BORE)
     kit_wheels[name] = (tyre.cut(bore).removeSplitter(), rim)
 
 # The white cab sits flat on the black lower cab; two filament dowels locate it
 kit_cab = cab.cut(fuse_all([cyl(DOWEL_R, DOWEL_D + 0.1, V(x, y, CAB_SPLIT - 0.1), up) for x, y in CAB_DOWELS]))
+# window pockets with fit clearance for the separate glass panels
+side_pocket = win_face.makeOffset2D(GLASS_CLEAR, join=0).extrude(V(0, GLASS_T + 1.02, 0))
+side_pocket.translate(V(0, HW - GLASS_T - 0.02, 0))
+kit_cab = kit_cab.cut(ws_panel(GLASS_CLEAR, 0.05, GLASS_T + 0.02)).cut(side_pocket).cut(mirror_y(side_pocket))
 kit_cab = kit_cab.removeSplitter()
 
 kit_box = cargo.cut(rear_zone).cut(reefer_envelope)           # leaves the reefer's locating recess
-kit_box = kit_box.cut(qr_square(qr_w + 2 * CLEAR, BOX_Z[1] - QR_PANEL_T - 0.02, BOX_Z[1] + 1))  # QR panel recess
-kit_qr = qr_panel.cut(qr_black).removeSplitter()
+kit_box = kit_box.cut(roof_slab(CLEAR, BOX_Z[1] - ROOF_PANEL_T - 0.02, BOX_Z[1] + 1))  # roof panel recess
+kit_roof = roof_panel.cut(roof_red).cut(roof_black).removeSplitter()
 kit_box = kit_box.fuse([cyl(PIN_R, PIN_L, V(DOOR_SPLIT, y, z), V(-1, 0, 0)) for y, z in DOOR_PINS])
 kit_box = kit_box.fuse([cyl(PEG_R, PEG_H + 0.05, V(x, 0, BOX_Z[0] - PEG_H), up) for x in BOX_PEGS])  # floor pegs
 kit_box = kit_box.removeSplitter()
@@ -802,13 +780,13 @@ kit_door_red = red_parts.common(rear_zone).removeSplitter()
 kit_door_black = black_text.common(rear_zone).removeSplitter()
 
 # Sanity check: in assembled position no two pieces may overlap
-kit_pieces = {"chassis": kit_chassis, "cab": kit_cab, "cab_red": cab_red,
+kit_pieces = {"chassis": kit_chassis, "cab": kit_cab, "glass_ws": glass_ws, "glass_side": glass_side,
               "box": kit_box, "box_red": kit_box_red, "box_black": kit_box_black, "box_grey": kit_box_grey,
               "door": kit_door, "door_red": kit_door_red, "door_black": kit_door_black,
               "reefer": reefer, "reefer_black": reefer_black,
               "wheel_front": kit_wheels["front"][0], "wheel_front_silver": kit_wheels["front"][1],
               "wheel_rear": kit_wheels["rear"][0], "wheel_rear_silver": kit_wheels["rear"][1],
-              "qr": kit_qr, "qr_black": qr_black}
+              "roof": kit_roof, "roof_red": roof_red, "roof_black": roof_black}
 names = list(kit_pieces)
 worst, pair = max((kit_pieces[a].common(kit_pieces[b]).Volume, f"{a}/{b}")
                   for i, a in enumerate(names) for b in names[i + 1:])
@@ -829,18 +807,21 @@ def to_print(shapes, axis=None, angle=0.0):
 
 
 chassis_p, = to_print([kit_chassis], V(1, 0, 0), 180)                                    # upside down
-cab_p, cab_red_p = to_print([kit_cab, cab_red])
+cab_p, = to_print([kit_cab])
+glass_ws_p, = to_print([glass_ws], V(0, 1, 0), -math.degrees(math.atan2(ws_n.x, ws_n.z)))   # outer face up
+glass_side_p, = to_print([glass_side], V(1, 0, 0), 90)                                     # outer face up
 box_p, box_red_p, box_black_p, box_grey_p = to_print([kit_box, kit_box_red, kit_box_black, kit_box_grey],
                                                      V(1, 0, 0), 90)                              # right side down
 door_p, door_red_p, door_black_p = to_print([kit_door, kit_door_red, kit_door_black], V(0, 1, 0), 90)  # face up
 reefer_p, reefer_black_p = to_print([reefer, reefer_black], V(0, 1, 0), -90)                         # front face up
 wf_p, wf_silver_p = to_print(list(kit_wheels["front"]), V(1, 0, 0), 90)                              # outer face up
 wr_p, wr_silver_p = to_print(list(kit_wheels["rear"]), V(1, 0, 0), 90)
-qr_p, qr_black_p = to_print([kit_qr, qr_black])                                                      # face up as is
+roof_p, roof_red_p, roof_black_p = to_print([kit_roof, roof_red, roof_black])                       # face up as is
 
 kit_doc = App.newDocument("ReeferTruckKit")
 layout = [("Kit_chassis_black", chassis_p, 0),
-          ("Kit_cab_white", cab_p, 50), ("Kit_cab_red", cab_red_p, 50),
+          ("Kit_cab_white", cab_p, 50),
+          ("Kit_glass_windscreen_black", glass_ws_p, 285), ("Kit_glass_side_black", glass_side_p, 300),
           ("Kit_box_white", box_p, 105), ("Kit_box_red", box_red_p, 105), ("Kit_box_black", box_black_p, 105),
           ("Kit_box_grey", box_grey_p, 105),
           ("Kit_door_white", door_p, 155), ("Kit_door_red", door_red_p, 155),
@@ -848,7 +829,8 @@ layout = [("Kit_chassis_black", chassis_p, 0),
           ("Kit_reefer_white", reefer_p, 200), ("Kit_reefer_black", reefer_black_p, 200),
           ("Kit_wheel_front_black", wf_p, 230), ("Kit_wheel_front_silver", wf_silver_p, 230),
           ("Kit_wheel_rear_black", wr_p, 250), ("Kit_wheel_rear_silver", wr_silver_p, 250),
-          ("Kit_qr_white", qr_p, 270), ("Kit_qr_black", qr_black_p, 270)]
+          ("Kit_roof_white", roof_p, 270), ("Kit_roof_red", roof_red_p, 270), ("Kit_roof_black", roof_black_p, 270)]
+layout = [entry for entry in layout if entry[1].Solids]
 for name, shp, y_off in layout:
     shp_path = os.path.join(KIT_DIR, f"{name[4:]}.stl")
     tmp = kit_doc.addObject("Part::Feature", name + "_export")
@@ -874,6 +856,20 @@ for row, kind in enumerate(("front", "rear")):
             plate[key].addMesh(m)
 for key, m in plate.items():
     m.write(os.path.join(KIT_DIR, f"wheels_plate_{key}.stl"))
+
+# Ready-made plate of one truck's glass: windscreen + left and right side windows, all outer
+# face up so each shows its smooth top surface (the right window is the left one mirrored)
+glass_right_p, = to_print([mirror_y(glass_side)], V(1, 0, 0), -90)
+glass_parts, x = [], 0.0
+for piece in (glass_ws_p, glass_side_p, glass_right_p):
+    q = piece.copy()
+    q.translate(V(x - q.BoundBox.XMin, -q.BoundBox.YMin, 0))
+    glass_parts.append(q)
+    x += piece.BoundBox.XLength + 4.0
+tmp = kit_doc.addObject("Part::Feature", "GlassPlate")
+tmp.Shape = Part.makeCompound(glass_parts)
+Mesh.export([tmp], os.path.join(KIT_DIR, "glass_plate_black.stl"), 0.01)
+kit_doc.removeObject(tmp.Name)
 for name, shp, _ in layout:
     b = shp.BoundBox
     print(f"  {name[4:]:14s} {b.XLength:5.1f} x {b.YLength:5.1f} x {b.ZLength:5.1f} mm (print height {b.ZLength:.1f})")
