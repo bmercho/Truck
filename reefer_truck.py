@@ -52,9 +52,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals
 # each length gets its own folder (e.g. 125mm\)
 OUT_DIR = os.path.join(SCRIPT_DIR, f"{TRUCK_LENGTH:g}mm")
 os.makedirs(OUT_DIR, exist_ok=True)
-ARTWORK = json.load(open(os.path.join(SCRIPT_DIR, "aldom_artwork.json")))
-# Final truck artwork from Aldom (Aldom-3D-Truck_Artwork: 1_Truck-Side_L, 2_Truck-Side_R,
-# 3_Truck-Back, 4_Truck-Top), extracted to aldom_final_artwork.json
+# Final truck artwork from Aldom/Quisk (Aldom-3D-Truck_Artwork/SVG: 1_Truck-Side_L, 2_Truck-Side_R,
+# 3_Truck-Back, 4_Truck-Top-Revised), converted to aldom_final_artwork.json by quisk_svg.py
 FINAL = json.load(open(os.path.join(SCRIPT_DIR, "aldom_final_artwork.json")))
 # rear doors: the back panel scaled to fit the door height and width; the lock bars break round its logo
 K_BACK = min(WIDTH / FINAL["back"]["size"][0], (BOX_Z[1] - BOX_Z[0]) / FINAL["back"]["size"][1])
@@ -322,104 +321,12 @@ reefer_envelope = box(BOX_X[1] - REEFER_SEAT - 0.02, GAP_FRONT + 1, -REEFER_HW -
                       REEFER_BOTTOM - 0.15 / SCALE, REEFER_TOP + 0.15 / SCALE)
 
 # ---- Branding: inlays set flush into the surface (for multi-colour printing) ------
-# Logos, wordmark and tagline are the vector outlines from the Aldom brand guidelines
-# (extracted to aldom_artwork.json). The slogan is set in Arial Bold, the guidelines'
-# approved stand-in for Helvetica Neue. Colours: red (#ab2328) logos and stripe, black
-# tagline and slogan, light grey A pattern.
-# Artwork is laid out in 2D "panel" coordinates as seen by a viewer standing outside
-# the panel: u to the right, v up (v = height above ground).
+# All artwork comes from Quisk's final panels (FINAL, see above): red, black and grey layers,
+# plus the white panel behind the roof QR code.
 INLAY_DEPTH = 0.6 / SCALE     # 0.6 mm deep in the printed model
 MIN_FEATURE = 0.22 / SCALE    # narrowest line a 0.2 mm nozzle prints reliably (0.22 mm)
-FONT_DIR, FONT_FILE = "C:/Windows/Fonts/", "arialbd.ttf"
-_cap_ref = []
-
-
-def text_face(txt, cap_h, width=None):
-    """Text as one face: baseline at v=0, left edge at u=0, sized by cap height.
-    `width` condenses (or stretches) it horizontally to that total width."""
-    def raw(t):
-        wires = [w for ch in Part.makeWireString(t, FONT_DIR, FONT_FILE, 10.0, 0) for w in ch]
-        return Part.makeFace(wires, "Part::FaceMakerBullseye")
-    if not _cap_ref:
-        _cap_ref.append(raw("H").BoundBox.YLength)
-    f = raw(txt)
-    k = cap_h / _cap_ref[0]
-    if width is None:
-        f.scale(k)                          # uniform: keeps the font's own curves
-    else:
-        m = App.Matrix()
-        m.scale(width / f.BoundBox.XLength, k, 1)
-        f = f.transformGeometry(m)          # non-uniform: converts to B-splines
-    f.translate(V(-f.BoundBox.XMin, 0, 0))
-    return f
-
-
 def poly_face(pts):
     return Part.Face(Part.makePolygon([V(u, v, 0) for u, v in pts] + [V(pts[0][0], pts[0][1], 0)]))
-
-
-def placed(face2d, u0, v0):
-    f = face2d.copy()
-    f.translate(V(u0, v0, 0))
-    return f
-
-
-def _art_bounds(names):
-    pts = [p for n in names for f in ARTWORK[n] for sp in f["subpaths"] for seg in sp for p in seg[1:]]
-    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
-    return min(xs), min(ys), max(xs), max(ys)
-
-
-def art_height(names, width):
-    x0, y0, x1, y1 = _art_bounds(names)
-    return (y1 - y0) * width / (x1 - x0)
-
-
-def artwork(names, width, u0, v0):
-    """Brand artwork (one or more pieces sharing the PDF's coordinates) scaled to `width`,
-    bottom-left corner at (u0, v0). Returns {"red": [faces], "black": [faces]}."""
-    x0, y0, x1, y1 = _art_bounds(names)
-    k = width / (x1 - x0)
-    out = {}
-    for n in names:
-        for fill in ARTWORK[n]:
-            wires = []
-            for sp in fill["subpaths"]:
-                edges = []
-                for seg in sp:
-                    pts = [V((p[0] - x0) * k + u0, (p[1] - y0) * k + v0, 0) for p in seg[1:]]
-                    if (pts[-1] - pts[0]).Length < 1e-7 and seg[0] == "L":
-                        continue
-                    if seg[0] == "L":
-                        edges.append(Part.LineSegment(pts[0], pts[1]).toShape())
-                    else:
-                        bz = Part.BezierCurve()
-                        bz.setPoles(pts)
-                        edges.append(bz.toShape())
-                wires.append(Part.Wire(edges))
-            out.setdefault(fill["colour"], []).append(Part.makeFace(wires, "Part::FaceMakerBullseye"))
-    return out
-
-
-def to_panel(faces2d, origin, u_dir, normal):
-    """Map 2D artwork onto a panel and extrude it inward by INLAY_DEPTH."""
-    m = App.Matrix(u_dir.x, 0, normal.x, origin.x,
-                   u_dir.y, 0, normal.y, origin.y,
-                   u_dir.z, 1, normal.z, origin.z, 0, 0, 0, 1)
-    solids = []
-    for f in faces2d:
-        g = f.copy()
-        g.transformShape(m)
-        g.translate(normal * 0.05)
-        solids.append(g.extrude(normal * -(INLAY_DEPTH + 0.05)))
-    return fuse_all(solids)
-
-
-def both_sides(art, u0_left, u0_right):
-    """Same composition on both sides as seen by the viewer. u0_left / u0_right: the x of
-    the viewer's left edge on the left (+Y, front on the viewer's left) and right (-Y) sides."""
-    return fuse_all([to_panel(art, V(u0_left, HW, 0), V(-1, 0, 0), V(0, 1, 0)),
-                     to_panel(art, V(u0_right, -HW, 0), V(1, 0, 0), V(0, -1, 0))])
 
 
 thin_report = []              # (label, shapes checked, shapes with a part thinner than MIN_FEATURE, unchecked)
@@ -507,7 +414,7 @@ K = {"side_left": K_SIDE, "side_right": K_SIDE, "back": K_BACK, "top": K_TOP}
 art = {(pn, c): art_faces(pn, c, K[pn]) for pn in FACES for c in ("red", "black", "grey")}
 
 # Roof: the QR code (aldom_qr.json, decodes to https://aldom.com.au/) sits on the artwork's
-# white rounded panel, which is cut out of the red diagonal
+# white rounded panel, which is kept clear of any red
 QR = json.load(open(os.path.join(SCRIPT_DIR, "aldom_qr.json")))
 _q, _w = FINAL["top"]["qr"], FINAL["top"]["rounded_white"][0]
 assert _q["modules"] == len(QR)
