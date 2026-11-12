@@ -30,7 +30,8 @@ FRONT_WHEEL_W = 3.4
 REAR_WHEEL_W = 4.0            # dual-tyre look
 WHEEL_Y = 7.8                 # inner face of wheels from centreline
 AXLE_Z = WHEEL_R
-AXLES = [(86.7, FRONT_WHEEL_W), (66.0, FRONT_WHEEL_W), (35.0, REAR_WHEEL_W), (22.4, REAR_WHEEL_W)]
+# three axles (Aldom feedback): the steer axle and the two rear axles; the axle behind the cab was removed
+AXLES = [(86.7, FRONT_WHEEL_W), (35.0, REAR_WHEEL_W), (22.4, REAR_WHEEL_W)]
 
 FRAME_W = 13.0
 FRAME_Z = (5.5, 8.0)
@@ -448,6 +449,20 @@ for label, key in (("left side red", ("side_left", "red")), ("left side black", 
         check_printable(label, art[key])
 
 
+# QR squares that touch only at a corner share a single edge, which is non-manifold in both the
+# black and the white. A tiny bridge at each such corner joins the black and parts the white;
+# at 0.06 mm it is far too small to print or to affect scanning.
+QR_BRIDGE = 0.06 / SCALE / 2
+for r in range(len(QR) - 1):
+    for c in range(len(QR) - 1):
+        a_, b_, c_, d_ = QR[r][c], QR[r][c + 1], QR[r + 1][c], QR[r + 1][c + 1]
+        if (a_ and d_ and not b_ and not c_) or (b_ and c_ and not a_ and not d_):
+            x = _q["x"] * K_TOP + (c + 1) * QR_MODULE
+            y = _q["v"] * K_TOP - (r + 1) * QR_MODULE
+            art[("top", "black")].append(poly_face([(x - QR_BRIDGE, y - QR_BRIDGE), (x + QR_BRIDGE, y - QR_BRIDGE),
+                                                    (x + QR_BRIDGE, y + QR_BRIDGE), (x - QR_BRIDGE, y + QR_BRIDGE)]))
+
+
 def inlay(panels, colour):
     return fuse_all([place_art(art[(pn, colour)], *FACES[pn]) for pn in panels if art[(pn, colour)]] or [Part.Shape()])
 
@@ -497,9 +512,9 @@ bumper = bumper.cut(fuse_all(lamps))
 underrun = cbox(0.0, 2.0, WIDTH - 2, 3.5, 5.5).fuse(cbox(2.0, 4.0, WIDTH - 2, 3.5, 5.5))
 underrun_brackets = [box(1.0, 3.0, y - 0.6, y + 0.6, 5.0, FRAME_Z[0] + 0.1) for y in (-5.0, 5.0)]
 rear_lights = [box(0.0, 0.8, y0, y0 + 2.5, 5.5, 6.4) for y0 in (-10.5, 8.0)]
-side_box = cbox(42.5, 59.5, WIDTH - 2, 5.0, BOX_Z[0] + 0.1)                 # skirt / battery box
-mudguards = [cbox(16.0, 41.5, WIDTH - 0.4, 10.2, BOX_Z[0] + 0.1),         # tandem
-             cbox(59.5, 72.5, WIDTH - 0.4, 10.2, BOX_Z[0] + 0.1)]         # 2nd axle
+# skirt / battery box, running forward to just short of the fuel tanks where the second axle used to be
+side_box = cbox(42.5, 71.4, WIDTH - 2, 5.0, BOX_Z[0] + 0.1)
+mudguards = [cbox(16.0, 41.5, WIDTH - 0.4, 10.2, BOX_Z[0] + 0.1)]        # rear tandem
 tanks = []
 for side in (1, -1):
     t = cyl_x(71.6, CAB_X0 - 0.3, side * 8.4, 7.4, 2.4)   # ends just behind the cab
@@ -611,7 +626,9 @@ print(f"printability (strokes under {MIN_FEATURE * SCALE:.2f} mm): " +
 #   chassis  black                prints upside down on the flat box seat (tree supports, build plate only)
 #   cab      white                prints upright
 #   glass    black                windscreen x1 + side window x2, flat; press into the cab's pockets
-#   box      white + red + black + grey  prints lying on its side: artwork only in the first/last layers
+#   box      white                plain body, prints standing on its front end (0.4 mm nozzle is fine)
+#   side_left / side_right  white + red + black + grey  the side artwork as 0.8 mm panels, printed face
+#                                 up (colour only in the top layers); they glue into recesses in the box
 #   door     white + red + black  rear door panel, prints flat with the outer face up
 #   reefer   white + black        fridge unit, prints front face up (black grille in the top layers)
 #   wheels   black + silver       print 4 front + 4 rear, outer face up (silver rim in the top layers);
@@ -670,15 +687,37 @@ side_pocket.translate(V(0, HW - GLASS_T - 0.02, 0))
 kit_cab = kit_cab.cut(ws_panel(GLASS_CLEAR, 0.05, GLASS_T + 0.02)).cut(side_pocket).cut(mirror_y(side_pocket))
 kit_cab = kit_cab.removeSplitter()
 
-kit_box = cargo.cut(rear_zone).cut(reefer_envelope)           # leaves the reefer's locating recess
+# Side artwork as separate panels: the box body becomes plain white and can print on the fast
+# 0.4 mm nozzle; only the thin panels need the 0.2 mm one. Each panel covers the side between the
+# frame lines and drops into a recess with fit clearance.
+SIDE_PANEL_T = 0.8 / SCALE
+PANEL_X = (ART_X[0], BOX_X[1] - 0.7)
+PANEL_Z = (BOX_Z[0] + 0.6, BOX_Z[1] - 0.6)
+side_zone = {}
+for name, sgn in (("side_left", 1), ("side_right", -1)):
+    yin, yout = sgn * (HW - SIDE_PANEL_T), sgn * (HW + 0.5)
+    side_zone[name] = box(PANEL_X[0], PANEL_X[1], min(yin, yout), max(yin, yout), PANEL_Z[0], PANEL_Z[1])
+side_panels = {}
+for name, zone in side_zone.items():
+    side_panels[name] = {"white": cargo.common(zone).removeSplitter(), "red": red_parts.common(zone).removeSplitter(),
+                         "black": black_text.common(zone).removeSplitter(), "grey": grey_parts.common(zone).removeSplitter()}
+
+
+def side_recess(sgn):
+    yin, yout = sgn * (HW - SIDE_PANEL_T - 0.02), sgn * (HW + 1)
+    return box(PANEL_X[0] - CLEAR, PANEL_X[1] + CLEAR, min(yin, yout), max(yin, yout), PANEL_Z[0] - CLEAR, PANEL_Z[1] + CLEAR)
+
+
+# box body: everything (any colour left outside the panels turns white), minus the door, the
+# reefer seat, the roof panel and the side panels
+kit_box = cargo.fuse(red_parts).fuse(black_text).fuse(grey_parts).removeSplitter()
+kit_box = kit_box.cut(rear_zone).cut(reefer_envelope)           # leaves the reefer's locating recess
+kit_box = kit_box.cut(side_recess(1)).cut(side_recess(-1))
 kit_box = kit_box.cut(roof_slab(CLEAR, BOX_Z[1] - ROOF_PANEL_T - 0.02, BOX_Z[1] + 1))  # roof panel recess
 kit_roof = roof_panel.cut(roof_red).cut(roof_black).removeSplitter()
 kit_box = kit_box.fuse([cyl(PIN_R, PIN_L, V(DOOR_SPLIT, y, z), V(-1, 0, 0)) for y, z in DOOR_PINS])
 kit_box = kit_box.fuse([cyl(PEG_R, PEG_H + 0.05, V(x, 0, BOX_Z[0] - PEG_H), up) for x in BOX_PEGS])  # floor pegs
 kit_box = kit_box.removeSplitter()
-kit_box_red = red_parts.cut(rear_zone).removeSplitter()
-kit_box_black = black_text.cut(rear_zone).removeSplitter()
-kit_box_grey = grey_parts.cut(rear_zone).removeSplitter()
 
 kit_door = cargo.common(rear_zone)
 kit_door = kit_door.cut(fuse_all([cyl(PIN_R + CLEAR, PIN_L + 0.1, V(DOOR_SPLIT + 0.1, y, z), V(-1, 0, 0))
@@ -688,7 +727,8 @@ kit_door_black = black_text.common(rear_zone).removeSplitter()
 
 # Sanity check: in assembled position no two pieces may overlap
 kit_pieces = {"chassis": kit_chassis, "cab": kit_cab, "glass_ws": glass_ws, "glass_side": glass_side,
-              "box": kit_box, "box_red": kit_box_red, "box_black": kit_box_black, "box_grey": kit_box_grey,
+              "box": kit_box,
+              **{f"{n}_{c}": shp for n, cols in side_panels.items() for c, shp in cols.items()},
               "door": kit_door, "door_red": kit_door_red, "door_black": kit_door_black,
               "reefer": reefer, "reefer_black": reefer_black,
               "wheel_front": kit_wheels["front"][0], "wheel_front_silver": kit_wheels["front"][1],
@@ -717,8 +757,10 @@ chassis_p, = to_print([kit_chassis], V(1, 0, 0), 180)                           
 cab_p, = to_print([kit_cab])
 glass_ws_p, = to_print([glass_ws], V(0, 1, 0), -math.degrees(math.atan2(ws_n.x, ws_n.z)))   # outer face up
 glass_side_p, = to_print([glass_side], V(1, 0, 0), 90)                                     # outer face up
-box_p, box_red_p, box_black_p, box_grey_p = to_print([kit_box, kit_box_red, kit_box_black, kit_box_grey],
-                                                     V(1, 0, 0), 90)                              # right side down
+box_p, = to_print([kit_box], V(0, 1, 0), 90)                                              # standing on its front end
+COLS = ("white", "red", "black", "grey")
+sl_p = to_print([side_panels["side_left"][c] for c in COLS], V(1, 0, 0), 90)                # outer face up
+sr_p = to_print([side_panels["side_right"][c] for c in COLS], V(1, 0, 0), -90)              # outer face up
 door_p, door_red_p, door_black_p = to_print([kit_door, kit_door_red, kit_door_black], V(0, 1, 0), 90)  # face up
 reefer_p, reefer_black_p = to_print([reefer, reefer_black], V(0, 1, 0), -90)                         # front face up
 wf_p, wf_silver_p = to_print(list(kit_wheels["front"]), V(1, 0, 0), 90)                              # outer face up
@@ -729,8 +771,9 @@ kit_doc = App.newDocument("ReeferTruckKit")
 layout = [("Kit_chassis_black", chassis_p, 0),
           ("Kit_cab_white", cab_p, 50),
           ("Kit_glass_windscreen_black", glass_ws_p, 285), ("Kit_glass_side_black", glass_side_p, 300),
-          ("Kit_box_white", box_p, 105), ("Kit_box_red", box_red_p, 105), ("Kit_box_black", box_black_p, 105),
-          ("Kit_box_grey", box_grey_p, 105),
+          ("Kit_box_white", box_p, 105),
+          *[(f"Kit_side_left_{c}", shp, 320) for c, shp in zip(COLS, sl_p)],
+          *[(f"Kit_side_right_{c}", shp, 360) for c, shp in zip(COLS, sr_p)],
           ("Kit_door_white", door_p, 155), ("Kit_door_red", door_red_p, 155),
           ("Kit_door_black", door_black_p, 155),
           ("Kit_reefer_white", reefer_p, 200), ("Kit_reefer_black", reefer_black_p, 200),
@@ -750,13 +793,13 @@ for name, shp, y_off in layout:
 kit_doc.recompute()
 kit_doc.saveAs(os.path.join(OUT_DIR, "ReeferTruck_kit.FCStd"))
 
-# Ready-made plate of all 8 wheels (4 front, 4 rear), black and silver files sharing coordinates
+# Ready-made plate of one truck's wheels (2 front, 4 rear), black and silver files sharing coordinates
 plate = {"black": Mesh.Mesh(), "silver": Mesh.Mesh()}
-for row, kind in enumerate(("front", "rear")):
+for row, (kind, count) in enumerate((("front", 2), ("rear", 4))):
     blk = Mesh.Mesh(os.path.join(KIT_DIR, f"wheel_{kind}_black.stl"))
     sil = Mesh.Mesh(os.path.join(KIT_DIR, f"wheel_{kind}_silver.stl"))
     pitch = blk.BoundBox.XLength + 4.0
-    for i in range(4):
+    for i in range(count):
         for src, key in ((blk, "black"), (sil, "silver")):
             m = src.copy()
             m.translate(i * pitch, row * pitch, 0)
