@@ -714,6 +714,13 @@ kit_box = cargo.fuse(red_parts).fuse(black_text).fuse(grey_parts).removeSplitter
 kit_box = kit_box.cut(rear_zone).cut(reefer_envelope)           # leaves the reefer's locating recess
 kit_box = kit_box.cut(side_recess(1)).cut(side_recess(-1))
 kit_box = kit_box.cut(roof_slab(CLEAR, BOX_Z[1] - ROOF_PANEL_T - 0.02, BOX_Z[1] + 1))  # roof panel recess
+# The roof recess reaches out to the side panel recesses, which left the box's top long edges
+# held on by a 0.025 mm sliver that peeled away in printing. Remove that strip altogether: the
+# roof recess opens into the side recesses, and the roof and side panels form the top edge.
+for sgn in (1, -1):
+    yin, yout = sgn * (ROOF_PANEL[2] + CLEAR), sgn * (HW + 1)
+    kit_box = kit_box.cut(box(PANEL_X[0] - CLEAR, ROOF_PANEL[1] + CLEAR, min(yin, yout), max(yin, yout),
+                              BOX_Z[1] - ROOF_PANEL_T - 0.02, BOX_Z[1] + 1))
 kit_roof = roof_panel.cut(roof_red).cut(roof_black).removeSplitter()
 kit_box = kit_box.fuse([cyl(PIN_R, PIN_L, V(DOOR_SPLIT, y, z), V(-1, 0, 0)) for y, z in DOOR_PINS])
 kit_box = kit_box.fuse([cyl(PEG_R, PEG_H + 0.05, V(x, 0, BOX_Z[0] - PEG_H), up) for x in BOX_PEGS])  # floor pegs
