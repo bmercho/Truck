@@ -49,5 +49,7 @@ Thumbs.db
 $RECYCLE.BIN/
 
 # Windows shortcuts
-*.lnk# Invoices hold bank and contact details; keep them out of the public repo
+*.lnk
+
+# Invoices hold bank and contact details; keep them out of the public repo
 Invoice_*.pdf
